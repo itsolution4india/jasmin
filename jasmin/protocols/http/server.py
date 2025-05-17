@@ -13,7 +13,6 @@ from jasmin.protocols.http.endpoints.balance import Balance
 from jasmin.protocols.http.endpoints.metrics import Metrics
 from jasmin.protocols.http.stats import HttpAPIStatsCollector
 from jasmin.protocols.http.endpoints.users import Users
-from jasmin.protocols.http.endpoints.dlr_webhook import DLRWebhook
 
 LOG_CATEGORY = "jasmin-http-api"
 
