@@ -54,7 +54,7 @@ class SubmitSmRouteNotFoundError(SubmitSmEventHandlerErrorNoShutdown):
     """
 
     def __init__(self):
-        self.status = pdu_types.CommandStatus.ESME_RINVDSTADR
+        self.status = pdu_types.CommandStatus.ESME_ROK
         SubmitSmEventHandlerErrorNoShutdown.__init__(self)
 
 

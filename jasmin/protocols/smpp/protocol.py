@@ -3,11 +3,13 @@ import logging
 import re
 import struct
 import uuid
-from datetime import datetime
-
+from datetime import datetime, timedelta
+import dateutil.parser as parser
+from smpp.pdu.pdu_types import (EsmClass, EsmClassMode, EsmClassType, EsmClassGsmFeatures,
+                                              MoreMessagesToSend, MessageState, AddrTon, AddrNpi)
 from twisted.cred import error
 from twisted.internet import defer, reactor
-
+from twisted.internet.threads import deferToThread
 from smpp.pdu.constants import data_coding_default_value_map
 from smpp.pdu.error import (SMPPClientConnectionCorruptedError, SMPPRequestTimoutError,
     SMPPSessionInitTimoutError, SMPPProtocolError,
@@ -20,11 +22,21 @@ from smpp.twisted.protocol import SMPPClientProtocol as twistedSMPPClientProtoco
 from smpp.twisted.protocol import SMPPServerProtocol as twistedSMPPServerProtocol
 from smpp.twisted.protocol import (SMPPSessionStates, SMPPOutboundTxn,
                                                  SMPPOutboundTxnResult)
+from smpp.pdu.pdu_types import (MessageState)
 from .error import *
+import time
+import random
+# from .factory import SMPPServerFactory
 
 # @todo: LOG_CATEGORY seems to be unused, check before removing it
 LOG_CATEGORY = "smpp.twisted.protocol"
 
+
+def generate_message_id():
+    first_part = random.randint(1000, 9999)
+    timestamp = int(time.time() * 1000)
+    random_part = random.randint(1000, 9999)
+    return f"smsc-{first_part}-{timestamp}-{random_part}"
 
 class SMPPClientProtocol(twistedSMPPClientProtocol):
     def __init__(self):
@@ -66,6 +78,10 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
     def connectionLost(self, reason):
         twistedSMPPClientProtocol.connectionLost(self, reason)
 
+        # Remove session tracking
+        if hasattr(self.factory, 'sessions') and self.session_id in self.factory.sessions:
+            del self.factory.sessions[self.session_id]
+        
         self.factory.stats.set('disconnected_at', datetime.now())
         self.factory.stats.inc('disconnected_count')
 
@@ -352,6 +368,24 @@ class SMPPClientProtocol(twistedSMPPClientProtocol):
 
         return twistedSMPPClientProtocol.sendDataRequest(self, pdu)
 
+_next_sequence_number = 1
+
+def get_next_sequence_number():
+    """Generate a unique sequence number for PDUs
+    
+    Returns a number between 1 and 0x7FFFFFFF (max 31-bit integer)
+    and automatically handles rollover
+    """
+    global _next_sequence_number
+    
+    seq_num = _next_sequence_number
+    
+    _next_sequence_number = (_next_sequence_number + 1) & 0x7FFFFFFF
+    
+    if _next_sequence_number == 0:
+        _next_sequence_number = 1
+        
+    return seq_num
 
 class SMPPServerProtocol(twistedSMPPServerProtocol):
     def __init__(self):
@@ -367,19 +401,163 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
         self.bind_type = None
         self.session_id = str(uuid.uuid4())
         self.log = logging.getLogger(LOG_CATEGORY)
+        
+    def get_db_connection(self):
+        import mysql.connector
+        """Establish database connection"""
+        try:
+            conn = mysql.connector.connect(
+                host='localhost',
+                port=3306,
+                user='prashanth@itsolution4india.com',
+                password='Solution@97',
+                database='smsc_table'
+            )
+            return conn
+        except Exception as e:
+            print(f"Database connection error: {e}")
+            return None
+    
+    def process_pending_dlrs(self, username):
+        try:
+            conn = self.get_db_connection()
+            if not conn:
+                self.log.error("Unable to process DLRs: DB connection failed.")
+                return
+
+            cursor = conn.cursor(dictionary=True)
+            query = """
+                SELECT message_id, source_addr, destination_addr, status
+                FROM smsc_responses
+                WHERE username = %s AND dlr_status = 'pending'
+            """
+            cursor.execute(query, (username,))
+            rows = cursor.fetchall()
+
+            for row in rows:
+                try:
+                    if row['status'] is None:
+                        self.log.info(f"Skipping DLR for message_id {row['message_id']} because status is NULL")
+                        continue  # Skip this row, keep it pending
+
+                    dlr_payload = {
+                        'message_id': row['message_id'],
+                        'source_addr': row['source_addr'],
+                        'destination_addr': row['destination_addr'],
+                        'username': username,
+                        'status': row['status']
+                    }
+                    self.log.info(f"Processing pending DLR for message_id {row['message_id']}")
+                    deferToThread(self.handle_dlr_payload, dlr_payload)
+
+                    # Mark this DLR as processed
+                    update_query = "UPDATE smsc_responses SET dlr_status = 'sent' WHERE message_id = %s"
+                    cursor.execute(update_query, (row['message_id'],))
+                except Exception as e:
+                    self.log.error(f"Failed to handle pending DLR for message_id {row['message_id']}: {e}")
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            self.log.error(f"Error in process_pending_dlrs: {e}")
+
+        
+    def handle_dlr_payload(self, payload):
+        """Processes the DLR payload and returns a response dictionary"""
+        try:
+            from smpp.pdu.operations import DeliverSM
+            
+            username = payload.get('username')
+            source_addr = payload.get('source_addr')
+            destination_addr = payload.get('destination_addr')
+            message_id = payload.get('message_id')
+            status = payload.get('status', '').lower().strip()  # e.g., 'delivered'
+
+            # Map WhatsApp webhook statuses to SMPP DLR fields
+            status_map = {
+                "sent":     {"stat": "DELIVRD", "err": "000", "state": MessageState.DELIVERED, "dlvrd": "001"},
+                "delivered":{"stat": "DELIVRD", "err": "000", "state": MessageState.DELIVERED, "dlvrd": "001"},
+                "read":     {"stat": "DELIVRD", "err": "000", "state": MessageState.DELIVERED, "dlvrd": "001"},
+                "reply":    {"stat": "DELIVRD", "err": "000", "state": MessageState.DELIVERED, "dlvrd": "001"},
+                "failed":   {"stat": "UNDELIV", "err": "001", "state": MessageState.UNDELIVERABLE, "dlvrd": "000"},
+            }
+
+            if status not in status_map:
+                raise ValueError(f"Unknown status '{status}'")
+
+            stat_conf = status_map[status]
+            stat_str = stat_conf["stat"]
+            err = stat_conf["err"]
+            message_state = stat_conf["state"]
+            dlvrd = stat_conf["dlvrd"]
+            sub = "001"
+            sub_date = datetime.now() - timedelta(minutes=2)
+
+            short_message = (
+                "id:%s sub:%s dlvrd:%s submit date:%s done date:%s stat:%s err:%s text:" % (
+                    message_id,
+                    sub,
+                    dlvrd,
+                    sub_date.strftime("%y%m%d%H%M"),
+                    datetime.now().strftime("%y%m%d%H%M"),
+                    stat_str,
+                    err,
+                )
+            )
+
+            deliver_sm = DeliverSM(
+                source_addr=destination_addr,
+                destination_addr=source_addr,
+                esm_class=EsmClass(EsmClassMode.DEFAULT, EsmClassType.SMSC_DELIVERY_RECEIPT),
+                receipted_message_id=message_id,
+                short_message=short_message.encode(),
+                message_state=message_state,
+                source_addr_ton=AddrTon.UNKNOWN,
+                source_addr_npi=AddrNpi.UNKNOWN,
+                dest_addr_ton=AddrTon.UNKNOWN,
+                dest_addr_npi=AddrNpi.UNKNOWN,
+            )
+            try:
+                deliver_sm.seqNum = get_next_sequence_number()
+            except Exception as e:
+                self.log.error(f"Error identifying PDU type: {str(e)}")
+                return {'error': f'Sequence number error: {str(e)}'}
+
+            # bind_mgr = self.bound_connections.get(username)
+
+            # # Add connection and bind information to logs for troubleshooting
+            # if not bind_mgr:
+            #     self.log.warning(f"No bind manager found for user: {username}")
+            #     return {'error': 'User not bound or unknown'}
+                
+            # conn = bind_mgr.get_active_connection()
+            # if not conn:
+            #     self.log.warning(f"No active SMPP connections found for user: {username}")
+            #     return {'error': 'No active SMPP connection for this user'}
+                
+            # Use Twisted's callFromThread to safely interact with the reactor thread
+            # reactor.callFromThread(conn.sendPDU, deliver_sm)
+            # self.log.info(f"Submitted DeliverSM to {username} for status {status}")
+            twistedSMPPServerProtocol.sendPDU(self, deliver_sm)
+            return {'success': True}
+
+        except Exception as e:
+            self.log.error(f"Error processing DLR payload: {e}")
+            return {'error': str(e)}
 
     def PDUReceived(self, pdu):
         self.log.debug(
-            "SMPP Server received PDU from system '%s' [command: %s, seq_number: %s, command_status: %s]",
+            "SMPP Server received custom PDU from system '%s' [command: %s, seq_number: %s, command_status: %s]",
             self.system_id, pdu.commandId, pdu.seqNum, pdu.status)
         self.log.debug("Complete PDU dump: %s", pdu)
         self.factory.stats.set('last_received_pdu_at', datetime.now())
-
-        # A better version than vendor's PDUReceived method:
-        # - Dont re-encode pdu !
-        # if self.log.isEnabledFor(logging.DEBUG):
-        #    encoded = self.encoder.encode(pdu)
-        #    self.log.debug("Receiving data [%s]" % _safelylogOutPdu(encoded))
+        
+        try:
+            if hasattr(pdu, 'params') and 'source_addr' in pdu.params:
+                self.log.debug("Received PDU with source_addr: %s", pdu.params['source_addr'])
+        except:
+            self.log.debug("Error")
 
         # Signal SMPP operation
         self.onSMPPOperation()
@@ -390,6 +568,64 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             self.PDUResponseReceived(pdu)
         else:
             getattr(self, "onPDU_%s" % pdu.commandId.name)(pdu)
+        
+        if pdu.commandId == CommandId.enquire_link_resp:
+            try:
+                deferToThread(self.process_pending_dlrs, str(self.system_id))
+            except Exception as e:
+                self.log.error(f"Failed to call Pending DLR: {e}")
+        
+        # try:
+        #     smpp_factory = SMPPServerFactory()
+        #     smpp_factory.send_pending_dlr(str(self.system_id))
+        # except Exception as e:
+        #     self.log.error("Failed to call send_pending_dlr")
+        
+        # try:
+        #     from smpp.pdu.pdu_types import CommandStatus
+        #     from smpp.pdu.operations import DeliverSM
+            
+        #     message_id = "smsc-7016-1746012248977-3888"
+        #     msgid = str(message_id)
+        #     message_state = MessageState.DELIVERED
+        #     stat_str = "ACCEPTD"
+        #     err = "000"
+        #     sub = "001"
+        #     dlvrd = "001"
+        #     sub_date = datetime.now() - timedelta(minutes=2)
+            
+        #     short_messages = (
+        #         "id:%s sub:%s dlvrd:%s submit date:%s done date:%s stat:%s err:%s text:" % (
+        #             msgid,
+        #             sub,
+        #             dlvrd,
+        #             sub_date.strftime("%y%m%d%H%M"),
+        #             datetime.now().strftime("%y%m%d%H%M"),
+        #             stat_str,
+        #             err,
+        #         )
+        #     )
+            
+        #     deliver_sm = DeliverSM(
+        #         source_addr='6361161836',
+        #         destination_addr="STEPlN",
+        #         esm_class=EsmClass(EsmClassMode.DEFAULT, EsmClassType.SMSC_DELIVERY_RECEIPT),
+        #         receipted_message_id=msgid.encode(),
+        #         short_message=short_messages.encode(),
+        #         message_state=message_state,
+        #         source_addr_ton=AddrTon.UNKNOWN,
+        #         source_addr_npi=AddrNpi.UNKNOWN, 
+        #         dest_addr_ton=AddrTon.UNKNOWN,
+        #         dest_addr_npi=AddrNpi.UNKNOWN,
+        #     )
+            
+        #     twistedSMPPServerProtocol.sendPDU(self, deliver_sm)
+        #     self.log.info("Submitted DeliverSM")
+        #     return
+            
+        # except Exception as e:
+        #     print(f"Webhook error: {str(e)}")
+        #     self.log.error(f"Webhook error: {str(e)}")
 
     def connectionMade(self):
         twistedSMPPServerProtocol.connectionMade(self)
@@ -399,6 +635,10 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
     def connectionLost(self, reason):
         twistedSMPPServerProtocol.connectionLost(self, reason)
 
+        # Remove session tracking
+        if hasattr(self.factory, 'sessions') and self.session_id in self.factory.sessions:
+            del self.factory.sessions[self.session_id]
+            
         self.factory.stats.inc('disconnect_count')
         self.factory.stats.dec('connected_count')
         if self.sessionState in [SMPPSessionStates.BOUND_RX,
@@ -480,16 +720,16 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
                 if self.user is not None:
                     self.user.getCnxStatus().smpps['submit_sm_count'] += 1
 
-    def onPDURequest_unbind(self, reqPDU):
-        twistedSMPPServerProtocol.onPDURequest_unbind(self, reqPDU)
+    # def onPDURequest_unbind(self, reqPDU):
+    #     twistedSMPPServerProtocol.onPDURequest_unbind(self, reqPDU)
 
-        self.factory.stats.inc('unbind_count')
-        if self.bind_type == CommandId.bind_transceiver:
-            self.factory.stats.dec('bound_trx_count')
-        elif self.bind_type == CommandId.bind_receiver:
-            self.factory.stats.dec('bound_rx_count')
-        elif self.bind_type == CommandId.bind_transmitter:
-            self.factory.stats.dec('bound_tx_count')
+    #     self.factory.stats.inc('unbind_count')
+    #     if self.bind_type == CommandId.bind_transceiver:
+    #         self.factory.stats.dec('bound_trx_count')
+    #     elif self.bind_type == CommandId.bind_receiver:
+    #         self.factory.stats.dec('bound_rx_count')
+    #     elif self.bind_type == CommandId.bind_transmitter:
+    #         self.factory.stats.dec('bound_tx_count')
 
     def PDUDataRequestReceived(self, reqPDU):
         if self.sessionState == SMPPSessionStates.BOUND_RX:
@@ -512,6 +752,101 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             return self.fatalErrorOnRequest(reqPDU, errMsg, CommandStatus.ESME_RSYSERR)
 
         twistedSMPPServerProtocol.PDURequestReceived(self, reqPDU)
+        # try:
+        #     if reqPDU.commandId == CommandId.submit_sm:
+                
+        #         from smpp.pdu.pdu_types import CommandStatus
+        #         from smpp.pdu.operations import DeliverSM
+                
+        #         message_id = "smsc-7016-1746012248977-3888"
+        #         msgid = str(message_id)
+        #         message_state = MessageState.DELIVERED
+        #         stat_str = "ACCEPTD"
+        #         err = "000"
+        #         sub = "001"
+        #         dlvrd = "001"
+        #         sub_date = datetime.now() - timedelta(minutes=2)
+                
+        #         short_messages = (
+        #             "id:%s sub:%s dlvrd:%s submit date:%s done date:%s stat:%s err:%s text:" % (
+        #                 msgid,
+        #                 sub,
+        #                 dlvrd,
+        #                 sub_date.strftime("%y%m%d%H%M"),
+        #                 datetime.now().strftime("%y%m%d%H%M"),
+        #                 stat_str,
+        #                 err,
+        #             )
+        #         )
+                
+        #         deliver_sm = DeliverSM(
+        #             source_addr=reqPDU.params.get('destination_addr', b''),
+        #             destination_addr=reqPDU.params.get('source_addr', b''),
+        #             esm_class=EsmClass(EsmClassMode.DEFAULT, EsmClassType.SMSC_DELIVERY_RECEIPT),
+        #             receipted_message_id=msgid.encode(),
+        #             short_message=short_messages.encode(),
+        #             message_state=message_state,
+        #             source_addr_ton=AddrTon.UNKNOWN,
+        #             source_addr_npi=AddrNpi.UNKNOWN, 
+        #             dest_addr_ton=AddrTon.UNKNOWN,
+        #             dest_addr_npi=AddrNpi.UNKNOWN,
+        #         )
+                
+        #         twistedSMPPServerProtocol.sendPDU(self, deliver_sm)
+        #         self.log.info("Submitted DeliverSM")
+        #         return
+            
+        # except Exception as e:
+        #     print(f"Webhook error: {str(e)}")
+        #     self.log.error(f"Webhook error: {str(e)}")
+        
+        # try:
+        #     from smpp.pdu.operations import DeliverSM
+            
+        #     message_id = "smsc-7016-1746012248977-6886"
+        #     msgid = str(message_id)
+        #     message_state = MessageState.DELIVERED
+        #     stat_str = "ACCEPTD"
+        #     err = "000"
+        #     sub = "001"
+        #     dlvrd = "001"
+        #     sub_date = datetime.now() - timedelta(minutes=2)
+            
+        #     short_messages = (
+        #         "id:%s sub:%s dlvrd:%s submit date:%s done date:%s stat:%s err:%s text:" % (
+        #             msgid,
+        #             sub,
+        #             dlvrd,
+        #             sub_date.strftime("%y%m%d%H%M"),
+        #             datetime.now().strftime("%y%m%d%H%M"),
+        #             stat_str,
+        #             err,
+        #         )
+        #     )
+            
+        #     deliver_sm = DeliverSM(
+        #         source_addr=reqPDU.params.get('destination_addr', b''),
+        #         destination_addr=reqPDU.params.get('source_addr', b''),
+        #         esm_class=EsmClass(EsmClassMode.DEFAULT, EsmClassType.SMSC_DELIVERY_RECEIPT),
+        #         receipted_message_id=msgid.encode(),
+        #         short_message=short_messages.encode(),
+        #         message_state=message_state,
+        #         source_addr_ton=AddrTon.UNKNOWN,
+        #         source_addr_npi=AddrNpi.UNKNOWN, 
+        #         dest_addr_ton=AddrTon.UNKNOWN,
+        #         dest_addr_npi=AddrNpi.UNKNOWN,
+        #     )
+            
+        #     try:
+        #         deliver_sm.seqNum = get_next_sequence_number()
+        #     except Exception as e:
+        #         self.log.error(f"local Error identifying PDU type: {str(e)}")
+            
+        #     twistedSMPPServerProtocol.sendPDU(self, deliver_sm)
+        #     self.log.info("Submitted DeliverSM")
+        # except Exception as e:
+        #     self.log.error(str(e))
+            
 
         # Update CnxStatus
         if self.user is not None:
