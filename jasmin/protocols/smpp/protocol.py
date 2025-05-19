@@ -411,7 +411,7 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
                 port=3306,
                 user='prashanth@itsolution4india.com',
                 password='Solution@97',
-                database='smsc_table'
+                database='smsc_db'
             )
             return conn
         except Exception as e:

@@ -369,7 +369,7 @@ class SMPPServerFactory(_SMPPServerFactory):
     def call_webhook(self, message_data):
         import requests
 
-        webhook_url = "https://smscapi.wtsmessage.xyz/webhook"
+        webhook_url = "https://smppapi.wtsmessage.xyz/webhook"
         payload = {}
         for key, value in message_data.items():
             if isinstance(value, bytes):
@@ -394,7 +394,7 @@ class SMPPServerFactory(_SMPPServerFactory):
                 port=3306,
                 user='prashanth@itsolution4india.com',
                 password='Solution@97',
-                database='smsc_table'
+                database='smsc_db'
             )
             return conn
         except Exception as e:
