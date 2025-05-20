@@ -441,7 +441,7 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
                         continue  # Skip this row, keep it pending
 
                     dlr_payload = {
-                        'message_id': row['message_id'],
+                        'message_id': row['message_id'].encode() if isinstance(row['message_id'], str) else row['message_id'],
                         'source_addr': row['source_addr'],
                         'destination_addr': row['destination_addr'],
                         'username': username,

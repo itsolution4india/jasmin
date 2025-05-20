@@ -424,7 +424,7 @@ class SMPPServerFactory(_SMPPServerFactory):
                         continue  # Skip this row, keep it pending
 
                     dlr_payload = {
-                        'message_id': row['message_id'],
+                        'message_id': row['message_id'].encode() if isinstance(row['message_id'], str) else row['message_id'],
                         'source_addr': row['source_addr'],
                         'destination_addr': row['destination_addr'],
                         'username': username,
@@ -605,8 +605,8 @@ class SMPPServerFactory(_SMPPServerFactory):
         #     # Prepare message data for webhook
         #     random_num = generate_message_id()
             message_id = generate_message_id()
-            # if isinstance(message_id, str):
-            #     message_id = message_id.encode()
+            if isinstance(message_id, str):
+                message_id = message_id.encode()
                 
             # Prepare payload for webhook
             if status == CommandStatus.ESME_ROK and message_id is not None:
