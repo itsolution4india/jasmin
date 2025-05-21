@@ -494,10 +494,10 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             sub = "001"
             sub_date = datetime.now() - timedelta(minutes=2)
 
-            message_id_str = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
+            # message_id_str = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
             short_message = (
                 "id:%s sub:%s dlvrd:%s submit date:%s done date:%s stat:%s err:%s text:" % (
-                    message_id_str,
+                    message_id,
                     sub,
                     dlvrd,
                     sub_date.strftime("%y%m%d%H%M"),
