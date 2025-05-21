@@ -369,21 +369,22 @@ class SMPPProtocolBase(Protocol):
     def sendPDU(self, pdu):
         """Send a SMPP PDU
         """
+
+        if pdu.commandId == CommandId.submit_sm_resp:
+            message_id = pdu.params.get('message_id', None)
+            if not message_id:
+                self.log.debug("Not sending submit_sm_resp: message_id is None or empty")
+                return
+            else:
+                if self.log.isEnabledFor(logging.DEBUG):
+                    self.log.debug("submit_sm_resp with message_id: %s", message_id)
+        
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("Sending custom PDU: %s" % pdu)
         encoded = self.encoder.encode(pdu)
 
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("Sending data [%s]" % _safelylogOutPdu(encoded))
-
-        if pdu.commandId == CommandId.submit_sm_resp:
-            message_id = pdu.params.get('message_id', None)
-            if not message_id:
-                self.log.warning("Not sending submit_sm_resp: message_id is None or empty")
-                return
-            else:
-                if self.log.isEnabledFor(logging.DEBUG):
-                    self.log.debug("submit_sm_resp with message_id: %s", message_id)
         
         self.transport.write(encoded)
         self.onSMPPOperation()
