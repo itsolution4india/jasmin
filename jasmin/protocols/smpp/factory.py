@@ -642,7 +642,7 @@ class SMPPServerFactory(_SMPPServerFactory):
                 #     deferToThread(self.process_pending_dlrs, str(routable.user))
                 # except Exception as e:
                 #     self.log.error(f"Failed to call Pending DLR: {e}")
-            return
+            # return
 
     def buildProtocol(self, addr):
         """Provision protocol with the dedicated logger
