@@ -494,9 +494,10 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             sub = "001"
             sub_date = datetime.now() - timedelta(minutes=2)
 
+            message_id_str = message_id.decode() if isinstance(message_id, bytes) else str(message_id)
             short_message = (
                 "id:%s sub:%s dlvrd:%s submit date:%s done date:%s stat:%s err:%s text:" % (
-                    message_id,
+                    message_id_str,
                     sub,
                     dlvrd,
                     sub_date.strftime("%y%m%d%H%M"),
@@ -524,21 +525,6 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
                 self.log.error(f"Error identifying PDU type: {str(e)}")
                 return {'error': f'Sequence number error: {str(e)}'}
 
-            # bind_mgr = self.bound_connections.get(username)
-
-            # # Add connection and bind information to logs for troubleshooting
-            # if not bind_mgr:
-            #     self.log.warning(f"No bind manager found for user: {username}")
-            #     return {'error': 'User not bound or unknown'}
-                
-            # conn = bind_mgr.get_active_connection()
-            # if not conn:
-            #     self.log.warning(f"No active SMPP connections found for user: {username}")
-            #     return {'error': 'No active SMPP connection for this user'}
-                
-            # Use Twisted's callFromThread to safely interact with the reactor thread
-            # reactor.callFromThread(conn.sendPDU, deliver_sm)
-            # self.log.info(f"Submitted DeliverSM to {username} for status {status}")
             twistedSMPPServerProtocol.sendPDU(self, deliver_sm)
             return {'success': True}
 
