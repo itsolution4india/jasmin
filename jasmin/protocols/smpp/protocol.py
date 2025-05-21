@@ -533,6 +533,8 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             return {'error': str(e)}
 
     def PDUReceived(self, pdu):
+        from smpp.pdu.operations import SubmitSMResp
+        
         self.log.debug(
             "SMPP Server received custom PDU from system '%s' [command: %s, seq_number: %s, command_status: %s]",
             self.system_id, pdu.commandId, pdu.seqNum, pdu.status)
@@ -560,6 +562,18 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
                 deferToThread(self.process_pending_dlrs, str(self.system_id))
             except Exception as e:
                 self.log.error(f"Failed to call Pending DLR: {e}")
+        
+        if pdu.commandId == CommandId.submit_sm:
+            self.log.debug("Handling submit_sm from %s", self.system_id)
+            message_id = "msc-2776-1747809991670-6798"
+            
+            response = SubmitSMResp(
+                message_id=message_id
+            )
+            response.status = CommandStatus.ESME_ROK
+            response.seqNum = pdu.seqNum
+            self.sendPDU(response)
+            self.log.info("Replied to submit_sm with message_id: %s", message_id)
         
         # try:
         #     smpp_factory = SMPPServerFactory()
