@@ -610,18 +610,18 @@ class SMPPServerFactory(_SMPPServerFactory):
                 
             # Prepare payload for webhook
             if status == CommandStatus.ESME_ROK and message_id is not None:
-                try:
-                    message_data = {
-                        'message_id': message_id,
-                        'source_addr': routable.pdu.params['source_addr'],
-                        'destination_addr': routable.pdu.params['destination_addr'],
-                        'short_message': routable.pdu.params['short_message'],
-                        'username': str(routable.user)
-                    }
-                    self.log.info(f'Calling webhook with message_id {message_id}')
-                    deferToThread(self.call_webhook, message_data)
-                except Exception as e:
-                    self.log.error(f"Failed to call webhook: {e}")
+                # try:
+                #     message_data = {
+                #         'message_id': message_id,
+                #         'source_addr': routable.pdu.params['source_addr'],
+                #         'destination_addr': routable.pdu.params['destination_addr'],
+                #         'short_message': routable.pdu.params['short_message'],
+                #         'username': str(routable.user)
+                #     }
+                #     self.log.info(f'Calling webhook with message_id {message_id}')
+                #     deferToThread(self.call_webhook, message_data)
+                # except Exception as e:
+                #     self.log.error(f"Failed to call webhook: {e}")
                 
                 DataHandlerResponse(status=status, message_id=message_id)
                 

@@ -31,7 +31,7 @@ from smpp.pdu.operations import (
     Unbind
 )
 from smpp.pdu.pdu_encoding import PDUEncoder
-from smpp.pdu.pdu_types import PDURequest, PDUResponse, PDUDataRequest, CommandStatus
+from smpp.pdu.pdu_types import PDURequest, PDUResponse, PDUDataRequest, CommandStatus, CommandId
 from smpp.pdu.error import (
     SMPPClientConnectionCorruptedError,
     PDUCorruptError,
@@ -370,12 +370,21 @@ class SMPPProtocolBase(Protocol):
         """Send a SMPP PDU
         """
         if self.log.isEnabledFor(logging.DEBUG):
-            self.log.debug("Sending PDU: %s" % pdu)
+            self.log.debug("Sending custom PDU: %s" % pdu)
         encoded = self.encoder.encode(pdu)
 
         if self.log.isEnabledFor(logging.DEBUG):
             self.log.debug("Sending data [%s]" % _safelylogOutPdu(encoded))
 
+        if pdu.commandId == CommandId.submit_sm_resp:
+            message_id = pdu.params.get('message_id', None)
+            if not message_id:
+                self.log.warning("Not sending submit_sm_resp: message_id is None or empty")
+                return
+            else:
+                if self.log.isEnabledFor(logging.DEBUG):
+                    self.log.debug("submit_sm_resp with message_id: %s", message_id)
+        
         self.transport.write(encoded)
         self.onSMPPOperation()
 

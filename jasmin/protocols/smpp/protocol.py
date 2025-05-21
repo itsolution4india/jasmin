@@ -532,6 +532,25 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
             self.log.error(f"Error processing DLR payload: {e}")
             return {'error': str(e)}
 
+    def call_webhook(self, message_data):
+        import requests
+
+        webhook_url = "https://smppapi.wtsmessage.xyz/webhook"
+        payload = {}
+        for key, value in message_data.items():
+            if isinstance(value, bytes):
+                payload[key] = value.decode('utf-8', errors='replace')
+            else:
+                payload[key] = value
+
+        try:
+            response = requests.post(webhook_url, json=payload, timeout=5)
+            self.log.info(f"Webhook called with status: {response.status_code}")
+            return response.status_code
+        except Exception as e:
+            self.log.error(f"Webhook call failed: {str(e)}")
+            return None
+    
     def PDUReceived(self, pdu):
         from smpp.pdu.operations import SubmitSMResp
         
@@ -565,7 +584,23 @@ class SMPPServerProtocol(twistedSMPPServerProtocol):
         
         if pdu.commandId == CommandId.submit_sm:
             self.log.debug("Handling submit_sm from %s", self.system_id)
-            message_id = "msc-2776-1747809991670-6798"
+            
+            message_id = generate_message_id()
+            if isinstance(message_id, str):
+                message_id = message_id.encode()
+            
+            try:
+                message_data = {
+                    'message_id': message_id,
+                    'source_addr': pdu.params['source_addr'].decode() if isinstance(pdu.params['source_addr'], bytes) else pdu.params['source_addr'],
+                    'destination_addr': pdu.params['destination_addr'].decode() if isinstance(pdu.params['destination_addr'], bytes) else pdu.params['destination_addr'],
+                    'short_message': pdu.params['short_message'].decode(errors='ignore') if isinstance(pdu.params['short_message'], bytes) else pdu.params['short_message'],
+                    'username': str(self.system_id) if self.system_id else 'unknown'
+                }
+                self.log.info(f'Calling webhook with message_id {message_id}')
+                deferToThread(self.call_webhook, message_data)
+            except Exception as e:
+                self.log.error(f"Failed to call webhook: {e}")
             
             response = SubmitSMResp(
                 message_id=message_id
